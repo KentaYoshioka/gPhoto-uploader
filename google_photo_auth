@@ -1,0 +1,163 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'bundler'
+require 'json'
+require 'net/https'
+require 'uri'
+Bundler.require
+
+class OauthData
+  attr_reader :redirect_port
+
+  def initialize(client_id, client_secret, _redirect_uri, auth_uri, token_uri)
+    @client_id = client_id
+    @client_secret = client_secret
+    #redirect_uri = credentials['installed']['redirect_uris'][0]
+    # Default redirect_uri specifies http port(80),
+    # but this is impossible for normal user since binding http port requires root priviledge
+    @redirect_uri = 'http://localhost:8080'
+    @redirect_port = 8080
+    @auth_uri = auth_uri
+    @token_uri = token_uri
+  end
+
+  def self.from_json(json)
+    client_id = json['installed']['client_id']
+    client_secret = json['installed']['client_secret']
+    redirect_uri = json['installed']['redirect_uris'][0]
+    auth_uri = json['installed']['auth_uri']
+    token_uri = json['installed']['token_uri']
+
+    new(client_id, client_secret, redirect_uri, auth_uri, token_uri)
+  end
+
+  def to_authorization_url
+    @auth_uri \
+       + '?response_type=code&client_id=' \
+       + @client_id \
+       + '&redirect_uri=' \
+       + @redirect_uri \
+       + '&scope=https://www.googleapis.com/auth/photoslibrary&access_type=offline'
+  end
+
+  def to_authentication_uri
+    @token_uri
+  end
+
+  def to_authentication_reqest_with_auth_code(auth_code)
+    {
+      code: auth_code,
+      client_id: @client_id,
+      client_secret: @client_secret,
+      redirect_uri: @redirect_uri,
+      grant_type: 'authorization_code',
+      access_type: 'offline'
+    }
+  end
+end
+
+def read_data_from(file_name)
+  File.open(file_name).read
+rescue Errno::ENOENT
+  warn "Cannot find secret file: #{file_name}"
+  exit 1
+rescue Errno::EACCES
+  warn "Cannot access secret file: #{file_name}"
+  exit 1
+rescue RuntimeError
+  warn "Failed to open secret file: #{file_name}"
+  exit 1
+end
+
+def parse_json_from_str(str)
+  JSON.parse(str)
+rescue JSON::ParserError
+  warn 'Given file is invalid format'
+  warn 'Please specify the json file downloaded from Google Cloud Platform'
+  warn '(https://console.cloud.google.com/)'
+  exit 1
+rescue RuntimeError
+  warn 'Faield to parse json from str'
+  exit 1
+end
+
+def authorize(oauth_data)
+  open_browser(oauth_data.to_authorization_url)
+
+  auth_code = nil
+  dev_null = WEBrick::Log.new('/dev/null', 7)
+  srv = WEBrick::HTTPServer.new({ DocumentRoot: './',
+                                  BindAddress: '127.0.0.1',
+                                  Port: oauth_datas.redirect_port,
+                                  Logger: dev_null,
+                                  AccessLog: dev_null })
+  srv.mount_proc '/' do |req, res|
+    auth_code = req.query['code']
+    res.body = res_message
+    srv.shutdown
+  end
+  srv.start
+
+  auth_code
+end
+
+def open_browser(url)
+  res = nil
+  if OS.windows?
+    res = system('start', url)
+  elsif OS.mac?
+    res = system('open', url)
+  elsif OS.linux?
+    res = system('xdg-open', url)
+  end
+
+  if (res.nil? || res == false)
+    puts 'Open below URL with your browser'
+    puts url
+  end
+end
+
+# A message that webrick returns to browser
+def res_message
+  <<~_EOT_
+    <html>
+      <head>
+        <title>gPhoto-uploader</title>
+      </head>
+      <body>
+        <center>
+          <h3>Success to get authentication code</h3>
+          <h4>Please close browser</h4>
+        </center>
+      </body>
+    </html>
+  _EOT_
+end
+
+def authenticate(oauth_data, auth_code)
+  uri = URI.parse(oauth_data.to_authentication_uri)
+  request = oauth_data.to_authentication_reqest_with_auth_code(auth_code)
+
+  res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    http.post(uri.request_uri, request.to_json, { 'Content-Type' => 'application/json' })
+  end
+
+  res.body
+end
+
+def write_to_file(file_name, content)
+  File.open(file_name, 'w') do |f|
+    f.puts(content)
+  end
+end
+
+# main function
+secret_data = read_data_from('credentials/secret.json')
+secret_data_json = parse_json_from_str(secret_data)
+oauth_data = OauthData.from_json(secret_data_json)
+
+auth_code = authorize(oauth_data)
+client_data = authenticate(oauth_data, auth_code)
+write_to_file('credentials/token.json', client_data)
