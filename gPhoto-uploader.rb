@@ -12,19 +12,22 @@ VERSION = '0.1.0'
 GOOGLE_TOKEN_PATH = './credentials/tokens.json'
 
 require 'optparse'
+require 'json'
+require 'uri'
+require 'net/http'
 
 def main(argv)
   params = get_cmdline_params(argv)
 
   photos_dir = params[:path]
-  photos = get_photos(photos_dir)
+  photos = Photo.get_from(photos_dir)
 
-  gphoto_uploader = GooglePhotosUploader.new(GOOGLE_TOKEN_PATH)
+  gphoto_uploader = GooglePhotosUploader.new(Token.new(GOOGLE_TOKEN_PATH))
   photos.each do |photo|
-    gphoto_uploader.upload(photo.data, photo.name, photo.text)
-  rescue
-    puts "Failed to upload photo: #{photo.name}"
-    exit 1
+    gphoto_uploader.upload(photo)
+  # rescue
+  #   puts "Failed to upload photo: #{photo.name}"
+  #   exit 1
   end
 end
 
@@ -52,37 +55,44 @@ def get_cmdline_params(argv)
 end
 
 class Photo
-  def initalize(path)
+  def initialize(path)
     @path = path
   end
 
-  def get_from(dir_path)
+  def self.get_from(dir_path)
     photos = []
     Dir.foreach(dir_path) do |file_name|
       path = File.join(dir_path, file_name)
       if file_name == '.' || file_name == '..'
         next
       elsif File.directory?(path)
-        walk(path)
+        photos += get_from(path)
       elsif photo?(path)
-        photos += new(path)
+        photos.push(Photo.new(path))
       end
     end
     photos
   end
 
   def name
-    @path.get_filename
+    filename_with_extension = File.basename(@path)
+    res = filename_with_extension.match(/(.+).(.+)$/)
+    if res[0].nil?
+      file_name = "temporary_#{rand}"
+    else
+      file_name = res[1]
+    end
+    file_name
   end
 
   def content
-    @path.get_read
+    File.open(@path).read
   end
 
   private
 
-  def photo?(file)
-    file.extension_mark.match(['png', 'jpg'])
+  def self.photo?(file)
+    ['.jpg', '.png'].include?(File.extname(file))
   end
 end
 
@@ -90,11 +100,11 @@ class Token
   # Read some values form google_token_path and refresh token
   def initialize(google_token_path)
     # read some values from google_token_path
-    token = JSON.parse(File.open(google_token_path))
+    token = JSON.parse(File.open(google_token_path).read)
     @refresh_token = token['refresh_token']
     @client_id = token['client_id']
     @client_secret = token['client_secret']
-    @expiration_time = token['expiration_time']
+    @expiration_time = token['expires_in']
 
     # update token
     @access_tokoen = update_token()
@@ -117,7 +127,7 @@ class Token
   # Check whether current access token is expires
   def expired?
     passed_time = Time.now - @last_updated_time
-    passed_time > @expiration_time
+    passed_time > @expiration_time.to_f
   end
 
   # update token
@@ -172,6 +182,14 @@ class GooglePhotosUploader
     res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
       http.verify_mode = OpenSSL::SSL::VERIFY_NONE
       http.post(uri.request_uri, req.to_json, header)
+    end
+
+    if res.code != 200
+      puts "Failed to upload photo"
+      puts "\n\n"
+      puts res.body
+      puts "\n\n"
+      raise RuntimeError
     end
 
     result = JSON.parse(res.body)['newMediaItemResults'][0]
