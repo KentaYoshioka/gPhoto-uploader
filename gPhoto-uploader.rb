@@ -11,29 +11,46 @@
 VERSION = '0.1.0'
 GOOGLE_TOKEN_PATH = './credentials/tokens.json'
 
+IMAGE_EXPANTIONS = ['.png', '.jpg']
+
 require 'optparse'
 require 'json'
 require 'uri'
 require 'net/http'
 
 def main(argv)
-  params = get_cmdline_params(argv)
+  begin
+    params = get_cmdline_params(argv)
+  rescue OptionParser::InvalidOption
+    puts 'gPhoto-uploader: Invalid argumet'
+    exit 1
+  rescue => e
+    puts e.message
+    exit 1
+  end
 
   photos_dir = params[:path]
   photos = Photo.get_from(photos_dir)
+  if photos.length.zero?
+    puts 'No photo was found'
+    exit 0
+  end
 
   gphoto_uploader = GooglePhotosUploader.new(Token.new(GOOGLE_TOKEN_PATH))
+
   photos.each do |photo|
-    gphoto_uploader.upload(photo)
-  # rescue
-  #   puts "Failed to upload photo: #{photo.name}"
-  #   exit 1
+    puts "Uploading #{photo.path}..."
+    url = gphoto_uploader.upload(photo)
+    puts "Complete to upload (#{url})"
+  rescue => e
+    puts "Failed to upload photo: #{photo.path}"
+    puts e.message
+    exit 1
   end
 end
 
 def get_cmdline_params(argv)
   params = {}
-
   OptionParser.new do |opt|
     opt.on('-r', '--remove', 'Remove uploaded photos') { |bool| option[:remove_flag] = bool }
     opt.on('-y', '--yes', 'Answer \'yes\' to all choises automatically') { |bool| option[:yes_flag] = bool }
@@ -45,16 +62,13 @@ def get_cmdline_params(argv)
     end
 
     params[:path] = argv[0]
-
-  rescue OptionParser::InvalidOption
-    puts 'gPhoto-uploader: Invalid argumet'
-    exit 1
   end
-
   params
 end
 
 class Photo
+  attr_reader :path
+
   def initialize(path)
     @path = path
   end
@@ -75,24 +89,15 @@ class Photo
   end
 
   def name
-    filename_with_extension = File.basename(@path)
-    res = filename_with_extension.match(/(.+).(.+)$/)
-    if res[0].nil?
-      file_name = "temporary_#{rand}"
-    else
-      file_name = res[1]
-    end
-    file_name
+    File.basename(@path)
   end
 
   def content
     File.open(@path).read
   end
 
-  private
-
   def self.photo?(file)
-    ['.jpg', '.png'].include?(File.extname(file))
+    IMAGE_EXPANTIONS.include?(File.extname(file))
   end
 end
 
@@ -107,7 +112,7 @@ class Token
     @expiration_time = token['expires_in']
 
     # update token
-    @access_tokoen = update_token()
+    @access_tokoen = update_token
     @last_updated_time = Time.now
   end
 
@@ -115,7 +120,7 @@ class Token
   def access_token
     # if current access_token expires, update token
     if expired?
-      update_token()
+      update_token
       @last_updated_time = Time.now
     end
 
@@ -136,11 +141,12 @@ class Token
                 client_id: @client_id,
                 client_secret: @client_secret,
                 grant_type: 'refresh_token' }
+    header = { 'Content-Type' => 'application/json' }
     uri = URI.parse('https://www.googleapis.com/oauth2/v4/token')
 
     res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
       http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-      http.post(uri.request_uri, request.to_json, { 'Content-Type' => 'application/json' })
+      http.post(uri.request_uri, request.to_json, header)
     end
 
     new_access_token = JSON.parse(res.body)['access_token']
@@ -154,55 +160,62 @@ class GooglePhotosUploader
   end
 
   def upload(photo)
-    # 画像データをアップロード
     @upload_url = 'https://photoslibrary.googleapis.com/v1/uploads'
     @mkmedia_url = 'https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate'
 
+    media_item_id = upload_photo(photo, @upload_url, @token)
+    create_media_item(@mkmedia_url, @token, media_item_id)
+  rescue => e
+    raise e.message
+  end
+
+  private
+
+  def upload_photo(photo, url, token)
     header = {
-      'Authorization' => "Bearer #{@token.access_token}",
+      'Authorization' => "Bearer #{token.access_token}",
       'Content-Type' => 'application/octet-stream',
       'X-Goog-Upload-Protocol' => 'raw',
       'X-Goog-Upload-File-Name' => photo.name
     }
+    uri = URI.parse(url)
 
-    uri = URI.parse(@upload_url)
     res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
       http.verify_mode = OpenSSL::SSL::VERIFY_NONE
       http.post(uri.request_uri, photo.content, header)
     end
-    upload_token = res.body
 
-    # メディアアイテムの作成
+    if res.code == '200'
+      res.body
+    else
+      raise "response is not ok (200)\n#{res.body}"
+    end
+  end
+
+  def create_media_item(url, token, media_item_id)
     header = {
-      'Authorization' => "Bearer #{@access_token}",
+      'Authorization' => "Bearer #{token.access_token}",
       'Content-Type' => 'application/json'
     }
-    req = { newMediaItems: { simpleMediaItem: { uploadToken: upload_token } } }
-    uri = URI.parse(@mkmedia_url)
+    req = { newMediaItems: { simpleMediaItem: { uploadToken: media_item_id } } }
+    uri = URI.parse(url)
+
     res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
       http.verify_mode = OpenSSL::SSL::VERIFY_NONE
       http.post(uri.request_uri, req.to_json, header)
     end
 
-    if res.code != 200
-      puts "Failed to upload photo"
-      puts "\n\n"
-      puts res.body
-      puts "\n\n"
-      raise RuntimeError
+    if res.code != '200'
+      raise "response is not success (200)\n#{res.body}"
     end
 
-    result = JSON.parse(res.body)['newMediaItemResults'][0]
-
-    if result['status']['message'] == 'OK'
-      url = result['mediaItem']['productUrl']
-      filename = result['mediaItem']['filename']
-      "<#{url}|#{filename}>"
+    res_json = JSON.parse(res.body)['newMediaItemResults'][0]
+    if res_json['status']['message'] == 'Success'
+      res_json['mediaItem']['productUrl']
     else
-      raise RuntimeError
+      raise "response is not success\n#{res.body}"
     end
   end
 end
 
 main(ARGV)
-

@@ -89,7 +89,7 @@ def authorize(oauth_data)
   dev_null = WEBrick::Log.new('/dev/null', 7)
   srv = WEBrick::HTTPServer.new({ DocumentRoot: './',
                                   BindAddress: '127.0.0.1',
-                                  Port: oauth_datas.redirect_port,
+                                  Port: oauth_data.redirect_port,
                                   Logger: dev_null,
                                   AccessLog: dev_null })
   srv.mount_proc '/' do |req, res|
@@ -147,6 +147,17 @@ def authenticate(oauth_data, auth_code)
   res.body
 end
 
+def create_token_data(secret_data_json, client_data_json)
+  JSON.generate(
+    {
+      "client_id": secret_data_json['installed']['client_id'],
+      "client_secret": secret_data_json['installed']['client_secret'],
+      "refresh_token": client_data_json['refresh_token'],
+      "expires_in": client_data_json['expires_in']
+    }
+  )
+end
+
 def write_to_file(file_name, content)
   File.open(file_name, 'w') do |f|
     f.puts(content)
@@ -160,4 +171,6 @@ oauth_data = OauthData.from_json(secret_data_json)
 
 auth_code = authorize(oauth_data)
 client_data = authenticate(oauth_data, auth_code)
-write_to_file('credentials/token.json', client_data)
+client_data_json = parse_json_from_str(client_data)
+token_data_json = create_token_data(secret_data_json, client_data_json)
+write_to_file('credentials/tokens.json', token_data_json)
