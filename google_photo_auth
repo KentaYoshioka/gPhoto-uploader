@@ -7,6 +7,18 @@ require 'net/https'
 require 'uri'
 Bundler.require
 
+def usage
+  <<-EOT
+Usage:
+  google_photo_auth CLIENT_SECRET.json
+
+Help:
+  CLIENT_SECRET.json is OAuth2.0 Clinet ID file with json format.
+  It can be downloaded from Google Cloud Platform.
+  (https://console.cloud.google.com/apis/credentials)
+  EOT
+end
+
 class OauthData
   attr_reader :redirect_port
 
@@ -165,7 +177,11 @@ def write_to_file(file_name, content)
 end
 
 # main function
-secret_data = read_data_from('credentials/secret.json')
+if ARGV.length() < 1
+  warn usage
+  exit 1
+end
+secret_data = read_data_from(ARGV[0])
 secret_data_json = parse_json_from_str(secret_data)
 oauth_data = OauthData.from_json(secret_data_json)
 
