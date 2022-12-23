@@ -11,7 +11,7 @@
 VERSION = '0.1.0'
 GOOGLE_TOKEN_PATH = './credentials/tokens.json'
 
-IMAGE_EXPANTIONS = ['.png', '.jpg']
+IMAGE_EXPANTIONS = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
 
 require 'optparse'
 require 'json'
